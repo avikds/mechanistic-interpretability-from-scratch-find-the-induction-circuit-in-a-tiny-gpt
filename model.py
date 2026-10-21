@@ -444,3 +444,45 @@ def ov_circuit(head):
     # Result shape: (d, d).
     return (W_O @ W_V).detach()
 
+# Step 10 - copying_score
+def copying_score(OV):
+    # Compute the eigenvalues of the OV circuit.
+    # Eigenvalues may be complex, so retain their real parts.
+    eigvals = torch.linalg.eigvals(OV)
+    real_parts = eigvals.real
+
+    # Measure the fraction of real eigenvalue mass that is positive.
+    numerator = torch.clamp(real_parts, min=0).sum()
+    denominator = real_parts.abs().sum()
+
+    # Avoid division by zero when all real parts are zero.
+    if denominator.item() == 0:
+        return 0.0
+
+    return float((numerator / denominator).item())
+
+
+def full_ov_circuit(model, layer, head):
+    # Extract the selected attention head's OV circuit in residual space.
+    OV = ov_circuit(model.layers[layer][head])
+
+    # Token embedding matrix: (V, d).
+    E = model.wte.weight
+
+    # Unembedding matrix: (V, d).
+    U = model.unembed.weight
+
+    # Compose embeddings, the OV circuit, and unembedding.
+    # M[s, t] measures the logit contribution to token t from
+    # attending to token s, ignoring layer normalization.
+    M = (E @ OV.T @ U.T).detach()
+
+    # Determine whether each row's largest entry lies on the diagonal.
+    row_max = M.max(dim=1).values
+    diagonal = M.diagonal()
+
+    # Count diagonal entries that attain their row's maximum.
+    diag_fraction = (diagonal == row_max).float().mean().item()
+
+    return M, float(diag_fraction)
+

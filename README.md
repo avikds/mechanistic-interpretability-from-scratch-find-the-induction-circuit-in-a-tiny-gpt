@@ -19,6 +19,7 @@ python scaffold.py
 - [x] **7.** head_scores
 - [x] **8.** phase_change
 - [x] **9.** qk_circuit
+- [x] **10.** copying_score
 
 ---
 
