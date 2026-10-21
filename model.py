@@ -176,3 +176,32 @@ class AttnOnlyGPT(nn.Module):
 
         return logits
 
+# Step 4 - icl_accuracy
+@torch.no_grad()
+def icl_accuracy(model, tokens, n):
+    # Predict the next token at each position except the final input position.
+    logits = model(tokens[:, :-1])
+    predictions = logits.argmax(dim=-1)
+
+    hits = 0
+    total = 0
+
+    # Score only the second copy, excluding its final token position.
+    for i in range(tokens.size(0)):
+        repeat_len = int(n[i].item())
+
+        # Score prediction positions [n, 2*n - 1).
+        # This gives exactly n - 1 next-token predictions.
+        start = repeat_len
+        end = 2 * repeat_len - 1
+
+        # Prediction at position t must match the token at position t + 1.
+        predicted = predictions[i, start:end]
+        targets = tokens[i, start + 1:end + 1]
+
+        hits += (predicted == targets).sum().item()
+        total += end - start
+
+    # Return the accuracy as a Python float.
+    return float(hits / total) if total > 0 else 0.0
+

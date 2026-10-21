@@ -13,6 +13,7 @@ python scaffold.py
 - [x] **1.** make_batch
 - [x] **2.** Head
 - [x] **3.** AttnOnlyGPT
+- [x] **4.** icl_accuracy
 
 ---
 
