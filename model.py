@@ -839,3 +839,174 @@ def ablation_effects(model, pairs, head, ref_pairs):
 
     return effects
 
+# Step 16 - path_patch_report
+@torch.no_grad()
+def forward_path_patched(model, tokens, clean_cache, sender, receiver, which):
+    # This experiment requires exactly two transformer layers.
+    if len(model.layers) != 2:
+        raise ValueError("Path patching requires exactly two layers.")
+
+    sender_layer, sender_head = sender
+    receiver_layer, receiver_head = receiver
+
+    if sender_layer != 0 or receiver_layer != 1:
+        raise ValueError(
+            "sender must be a layer-0 head and receiver a layer-1 head."
+        )
+
+    # An empty string means no pathway is patched.
+    # "all" is accepted as an alias for "qkv".
+    if which == "all":
+        which = "qkv"
+
+    if which not in ("", "q", "k", "v", "qkv"):
+        raise ValueError(
+            "which must be '', 'q', 'k', 'v', 'qkv', or 'all'."
+        )
+
+    # Token and positional embeddings.
+    B, T = tokens.shape
+    positions = torch.arange(T, device=tokens.device)
+    x0 = model.wte(tokens) + model.wpe(positions)
+
+    # Causal attention mask: True marks forbidden positions.
+    mask = torch.triu(
+        torch.ones(T, T, dtype=torch.bool, device=tokens.device),
+        diagonal=1,
+    )
+
+    # ---------------------------------------------------------
+    # Layer 0: compute the sender's output on the current prompt.
+    # ---------------------------------------------------------
+    inp0 = model.lns[0](x0)
+    head_sum0 = torch.zeros_like(x0)
+    sender_corrupt = None
+
+    for h, head in enumerate(model.layers[0]):
+        head_out, _ = head(inp0, mask)
+        head_sum0 = head_sum0 + head_out
+
+        if h == sender_head:
+            sender_corrupt = head_out
+
+    # Normal residual stream entering layer 1.
+    x1 = x0 + head_sum0
+
+    # Retrieve the sender's activation from the reference run.
+    sender_key = ("head", sender_layer, sender_head)
+
+    if sender_key not in clean_cache:
+        raise KeyError(f"Missing cached sender activation: {sender_key}")
+
+    sender_clean = clean_cache[sender_key]
+
+    if sender_clean.shape != x1.shape:
+        raise ValueError(
+            "The cached sender activation must match the residual-stream shape."
+        )
+
+    # Alternative layer-1 input with the sender's write replaced.
+    x1_alt = x1 - sender_corrupt + sender_clean
+
+    # Normalize the normal and alternative residual streams.
+    inp1 = model.lns[1](x1)
+    inp1_alt = model.lns[1](x1_alt)
+
+    # ---------------------------------------------------------
+    # Layer 1: patch only the specified receiver pathway.
+    # ---------------------------------------------------------
+    head_sum1 = torch.zeros_like(x1)
+
+    for h, head in enumerate(model.layers[1]):
+        if h != receiver_head:
+            # Non-receiver heads always use the normal corrupted stream.
+            head_out, _ = head(inp1, mask)
+        else:
+            # Default: use the corrupted stream for all three inputs.
+            q_input = inp1
+            k_input = inp1
+            v_input = inp1
+
+            # Route the alternative stream through only the selected inputs.
+            if which in ("q", "qkv"):
+                q_input = inp1_alt
+
+            if which in ("k", "qkv"):
+                k_input = inp1_alt
+
+            if which in ("v", "qkv"):
+                v_input = inp1_alt
+
+            # The Head class independently projects queries, keys, and values.
+            head_out, _ = head(
+                q_input,
+                mask,
+                x_k=k_input,
+                x_v=v_input,
+            )
+
+        head_sum1 = head_sum1 + head_out
+
+    # Apply the residual connection and compute vocabulary logits.
+    x2 = x1 + head_sum1
+    logits = model.unembed(model.lnf(x2))
+
+    return logits
+
+
+@torch.no_grad()
+def path_patch_report(model, pairs, sender, receiver):
+    # Cache activations from the clean run.
+    clean_cache = {}
+    model(pairs["clean"], cache=clean_cache)
+
+    # Measure clean and corrupted baseline logit differences.
+    m_clean = logit_diff(
+        model,
+        pairs["clean"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    m_corrupt = logit_diff(
+        model,
+        pairs["corrupt"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    denominator = m_clean - m_corrupt
+    report = {}
+
+    # Measure restoration through each individual pathway and all pathways.
+    for which in ("q", "k", "v", "qkv"):
+        logits = forward_path_patched(
+            model,
+            pairs["corrupt"],
+            clean_cache,
+            sender,
+            receiver,
+            which,
+        )
+
+        rows = torch.arange(logits.shape[0], device=logits.device)
+        pos = pairs["pos"].to(device=logits.device, dtype=torch.long)
+        answer = pairs["answer"].to(device=logits.device, dtype=torch.long)
+        wrong = pairs["wrong"].to(device=logits.device, dtype=torch.long)
+
+        m_patched = (
+            logits[rows, pos, answer] - logits[rows, pos, wrong]
+        ).mean().item()
+
+        # Normalize restoration by the clean-to-corrupt difference.
+        if abs(denominator) < 1e-12:
+            restoration = 0.0
+        else:
+            restoration = (m_patched - m_corrupt) / denominator
+
+        report[which] = float(restoration)
+
+    return report
+

@@ -25,6 +25,7 @@ python scaffold.py
 - [x] **13.** make_pairs
 - [x] **14.** patching_grid
 - [x] **15.** ablation_effects
+- [x] **16.** path_patch_report
 
 ---
 
