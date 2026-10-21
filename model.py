@@ -1328,3 +1328,40 @@ def top_k_overlap(grid_a, grid_b, k):
 
     return float(overlap / k)
 
+# Step 20 - build_model
+def build_model(seed=0, steps=2000, log_every=100):
+    # Seed PyTorch before model initialization for reproducibility.
+    torch.manual_seed(seed)
+
+    # Initialize the tiny attention-only GPT.
+    model = AttnOnlyGPT()
+
+    # Train the model while recording in-context accuracy and head scores.
+    history = train_model(
+        model,
+        steps=steps,
+        seed=seed,
+        log_every=log_every,
+        probe=score_probe,
+    )
+
+    # Measure attention-pattern scores for every head after training.
+    scores = head_scores(model)
+
+    # Classify heads as induction heads or previous-token heads.
+    roles = classify_heads(scores)
+
+    # Identify when in-context accuracy and induction scores cross
+    # their respective thresholds during training.
+    phase = phase_change(history)
+
+    # Return the complete experiment artifact.
+    return {
+        "model": model,
+        "history": history,
+        "scores": scores,
+        "roles": roles,
+        "phase": phase,
+        "seed": seed,
+    }
+
