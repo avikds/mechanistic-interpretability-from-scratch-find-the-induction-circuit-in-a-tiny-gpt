@@ -668,3 +668,90 @@ def logit_diff(model, tokens, pos, answer, wrong, patch=None):
 
     return float(difference.mean().item())
 
+# Step 14 - patching_grid
+@torch.no_grad()
+def patching_grid(model, pairs):
+    # Cache activations from the clean and corrupted prompts.
+    clean_cache = {}
+    corrupt_cache = {}
+
+    model(pairs["clean"], cache=clean_cache)
+    model(pairs["corrupt"], cache=corrupt_cache)
+
+    # Measure the clean and corrupted baseline behaviors.
+    m_clean = logit_diff(
+        model,
+        pairs["clean"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    m_corrupt = logit_diff(
+        model,
+        pairs["corrupt"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    # Normalization denominator for restoration scores.
+    denominator = m_clean - m_corrupt
+
+    # Determine the number of layers, heads, and prompt positions.
+    L = len(model.layers)
+    H = len(model.layers[0]) if L > 0 else 0
+    T = pairs["clean"].shape[1]
+
+    # Each row corresponds to one (layer, head) pair.
+    grid = torch.zeros(
+        (L * H, T),
+        dtype=torch.float32,
+        device=pairs["clean"].device,
+    )
+    labels = []
+
+    row_idx = 0
+
+    for l, layer in enumerate(model.layers):
+        for h, _ in enumerate(layer):
+            key = ("head", l, h)
+
+            # Retrieve the corresponding clean and corrupted head outputs.
+            clean_head = clean_cache[key]
+            corrupt_head = corrupt_cache[key]
+
+            labels.append((l, h))
+
+            for p in range(T):
+                # Start with the corrupted head output at every position.
+                patched_head = corrupt_head.clone()
+
+                # Restore this head's output at position p for every batch row.
+                patched_head[:, p, :] = clean_head[:, p, :]
+
+                # Patch only this head and this position.
+                patch = {key: patched_head}
+
+                # Evaluate the corrupted prompts with the intervention.
+                m = logit_diff(
+                    model,
+                    pairs["corrupt"],
+                    pairs["pos"],
+                    pairs["answer"],
+                    pairs["wrong"],
+                    patch=patch,
+                )
+
+                # Measure normalized recovery of the clean behavior.
+                if abs(denominator) < 1e-12:
+                    restoration = 0.0
+                else:
+                    restoration = (m - m_corrupt) / denominator
+
+                grid[row_idx, p] = restoration
+
+            row_idx += 1
+
+    return grid, labels
+
