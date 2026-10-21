@@ -20,6 +20,7 @@ python scaffold.py
 - [x] **8.** phase_change
 - [x] **9.** qk_circuit
 - [x] **10.** copying_score
+- [x] **11.** k_composition
 
 ---
 

@@ -486,3 +486,77 @@ def full_ov_circuit(model, layer, head):
 
     return M, float(diag_fraction)
 
+# Step 11 - k_composition
+def k_composition(QK_later, OV_earlier):
+    # Measure how strongly the later head reads the earlier head's write.
+    qk_norm = torch.linalg.norm(QK_later, ord="fro")
+    ov_norm = torch.linalg.norm(OV_earlier, ord="fro")
+
+    denominator = qk_norm * ov_norm
+
+    # Handle zero-norm circuits safely.
+    if denominator.item() == 0:
+        return 0.0
+
+    composed = QK_later @ OV_earlier
+    score = torch.linalg.norm(composed, ord="fro") / denominator
+
+    return float(score.item())
+
+
+def composition_matrix(model):
+    # Layer 0 contains the earlier (writing) heads.
+    # Layer 1 contains the later (reading) heads.
+    earlier_heads = model.layers[0]
+    later_heads = model.layers[1]
+
+    H0 = len(earlier_heads)
+    H1 = len(later_heads)
+
+    C = torch.empty(
+        H0,
+        H1,
+        dtype=model.wte.weight.dtype,
+        device=model.wte.weight.device,
+    )
+
+    for a, earlier in enumerate(earlier_heads):
+        OV_earlier = ov_circuit(earlier)
+
+        for b, later in enumerate(later_heads):
+            QK_later = qk_circuit(later)
+            C[a, b] = k_composition(QK_later, OV_earlier)
+
+    return C
+
+
+def random_composition_baseline(gen, d, d_head, trials):
+    if trials <= 0:
+        return 0.0
+
+    scores = []
+
+    for _ in range(trials):
+        # Generate a reproducible seed for this trial.
+        seed_i = int(
+            torch.randint(0, 2**31, (1,), generator=gen).item()
+        )
+
+        # Keep the trial's random initialization isolated.
+        with torch.random.fork_rng():
+            torch.manual_seed(seed_i)
+
+            # First head is the earlier writer; second is the later reader.
+            first = Head(d, d_head)
+            second = Head(d, d_head)
+
+            # Match composition_matrix's reader–writer ordering.
+            QK_later = qk_circuit(second)
+            OV_earlier = ov_circuit(first)
+
+            scores.append(
+                k_composition(QK_later, OV_earlier)
+            )
+
+    return float(sum(scores) / len(scores))
+
