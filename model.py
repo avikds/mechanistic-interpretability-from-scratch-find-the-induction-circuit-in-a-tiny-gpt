@@ -1203,3 +1203,128 @@ def circuit_scores(model, pairs, circuit, ref_pairs):
         "m_none": float(m_none),
     }
 
+# Step 19 - attribution_patching
+def attribution_patching(model, pairs):
+    # Cache head activations from the clean and corrupted prompts.
+    clean_cache = {}
+    corrupt_cache = {}
+
+    with torch.no_grad():
+        model(pairs["clean"], cache=clean_cache)
+        model(pairs["corrupt"], cache=corrupt_cache)
+
+    # Compute the clean and corrupted baseline logit differences.
+    m_clean = logit_diff(
+        model,
+        pairs["clean"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    m_corrupt = logit_diff(
+        model,
+        pairs["corrupt"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    denominator = m_clean - m_corrupt
+
+    # Enumerate the heads in layer-major, head-major order.
+    labels = [
+        (l, h)
+        for l, layer in enumerate(model.layers)
+        for h in range(len(layer))
+    ]
+
+    B, T = pairs["corrupt"].shape
+    device = pairs["corrupt"].device
+
+    # Create differentiable patch tensors from the corrupted activations.
+    # Each tensor has shape (B, T, d_model).
+    patches = {
+        ("head", l, h): corrupt_cache[("head", l, h)]
+        .detach()
+        .clone()
+        .requires_grad_(True)
+        for l, h in labels
+    }
+
+    # Run the corrupted prompt with every head output exposed as a
+    # differentiable patch tensor.
+    logits = model(pairs["corrupt"], patch=patches)
+
+    rows = torch.arange(B, device=device)
+    pos = pairs["pos"].to(device=device, dtype=torch.long)
+    answer = pairs["answer"].to(device=device, dtype=torch.long)
+    wrong = pairs["wrong"].to(device=device, dtype=torch.long)
+
+    # Compute the per-example logit differences without detaching them.
+    row_diff = (
+        logits[rows, pos, answer]
+        - logits[rows, pos, wrong]
+    )
+
+    # Differentiate the sum of per-example metrics. Averaging the resulting
+    # gradient-times-difference contributions below yields the estimate
+    # for the mean logit-difference metric.
+    patch_tensors = tuple(patches[("head", l, h)] for l, h in labels)
+
+    grads = torch.autograd.grad(
+        row_diff.sum(),
+        patch_tensors,
+        allow_unused=True,
+    )
+
+    # Construct the estimated restoration grid.
+    grid = torch.zeros(
+        (len(labels), T),
+        dtype=logits.dtype,
+        device=device,
+    )
+
+    if abs(denominator) >= 1e-12:
+        for row_idx, ((l, h), grad) in enumerate(zip(labels, grads)):
+            if grad is None:
+                continue
+
+            key = ("head", l, h)
+
+            # Difference between clean and corrupted activations.
+            delta = clean_cache[key] - corrupt_cache[key]
+
+            # Gradient-times-difference attribution at each position,
+            # averaged over examples.
+            contribution = (grad * delta).sum(dim=-1).mean(dim=0)
+
+            # Normalize consistently with the exact patching grid.
+            grid[row_idx] = contribution / denominator
+
+    return grid.detach(), labels
+
+
+def top_k_overlap(grid_a, grid_b, k):
+    # Flatten both grids before comparing their most important entries.
+    a = grid_a.reshape(-1)
+    b = grid_b.reshape(-1)
+
+    if a.numel() != b.numel():
+        raise ValueError("Both grids must contain the same number of entries.")
+
+    if k <= 0 or a.numel() == 0:
+        return 0.0
+
+    # Restrict k to the number of available entries.
+    k = min(int(k), a.numel())
+
+    # Find the indices of the k largest entries in each grid.
+    top_a = torch.topk(a, k).indices
+    top_b = torch.topk(b, k).indices
+
+    # Fraction of top-k indices shared by both grids.
+    overlap = torch.isin(top_a, top_b).sum().item()
+
+    return float(overlap / k)
+

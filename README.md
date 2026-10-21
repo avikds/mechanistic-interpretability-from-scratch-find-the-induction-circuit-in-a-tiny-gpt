@@ -28,6 +28,7 @@ python scaffold.py
 - [x] **16.** path_patch_report
 - [x] **17.** direct_logit_attribution
 - [x] **18.** circuit_scores
+- [x] **19.** attribution_patching
 
 ---
 
