@@ -360,3 +360,64 @@ def classify_heads(scores, ind_thresh=0.5, prev_thresh=0.25):
 
     return result
 
+# Step 8 - phase_change
+def score_probe(model):
+    # Measure attention-pattern scores for every head.
+    scores = head_scores(model)
+
+    # Find the largest induction and previous-token scores across all heads.
+    max_induction = max(
+        (score["induction"] for score in scores.values()),
+        default=0.0
+    )
+
+    max_prev = max(
+        (score["prev_token"] for score in scores.values()),
+        default=0.0
+    )
+
+    # Return scalar metrics suitable for train_model's probe argument.
+    return {
+        "max_induction": float(max_induction),
+        "max_prev": float(max_prev),
+    }
+
+
+def phase_change(history, acc_thresh=0.5, score_thresh=0.5):
+    # Find the first step at which in-context accuracy reaches its threshold.
+    acc_step = next(
+        (
+            record["step"]
+            for record in history
+            if record["icl_acc"] >= acc_thresh
+        ),
+        None
+    )
+
+    # Find the first step at which the maximum induction score reaches
+    # its threshold.
+    induction_step = next(
+        (
+            record["step"]
+            for record in history
+            if record["max_induction"] >= score_thresh
+        ),
+        None
+    )
+
+    # Handle an empty history without raising an IndexError.
+    if not history:
+        final_acc = None
+        final_induction = None
+    else:
+        # Report the metrics recorded at the final training step.
+        final_acc = history[-1]["icl_acc"]
+        final_induction = history[-1]["max_induction"]
+
+    return {
+        "acc_step": acc_step,
+        "induction_step": induction_step,
+        "final_acc": final_acc,
+        "final_induction": final_induction,
+    }
+

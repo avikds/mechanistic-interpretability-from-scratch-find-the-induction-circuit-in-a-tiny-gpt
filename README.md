@@ -17,6 +17,7 @@ python scaffold.py
 - [x] **5.** train_model
 - [x] **6.** induction_score
 - [x] **7.** head_scores
+- [x] **8.** phase_change
 
 ---
 
