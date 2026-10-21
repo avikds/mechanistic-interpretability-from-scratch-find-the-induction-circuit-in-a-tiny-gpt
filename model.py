@@ -1365,3 +1365,142 @@ def build_model(seed=0, steps=2000, log_every=100):
         "seed": seed,
     }
 
+# Step 21 - circuit_evidence
+def resolve_roles(built):
+    # Retrieve the trained model, measured head scores, and classified roles.
+    model = built["model"]
+    scores = built["scores"]
+    roles = built["roles"]
+
+    # Enumerate heads in each of the model's first two layers.
+    layer0_heads = [
+        (0, h) for h in range(len(model.layers[0]))
+    ]
+    layer1_heads = [
+        (1, h) for h in range(len(model.layers[1]))
+    ]
+
+    if not layer0_heads or not layer1_heads:
+        raise ValueError(
+            "Role resolution requires heads in both layers 0 and 1."
+        )
+
+    # Prefer the first classified previous-token head.
+    # Otherwise, select the layer-0 head with the highest previous-token score.
+    previous = roles.get("previous", [])
+
+    if previous:
+        prev = previous[0]
+    else:
+        prev = max(
+            layer0_heads,
+            key=lambda head: scores[head]["prev_token"],
+        )
+
+    # Prefer all classified induction heads.
+    # If none were classified, select the best-scoring layer-1 candidate.
+    inds = list(roles.get("induction", []))
+
+    if not inds:
+        best_induction = max(
+            layer1_heads,
+            key=lambda head: scores[head]["induction"],
+        )
+        inds = [best_induction]
+
+    return prev, inds
+
+
+def circuit_evidence(built):
+    # Retrieve the trained model and its attention-pattern scores.
+    model = built["model"]
+    scores = built["scores"]
+
+    # Resolve candidate previous-token and induction heads.
+    prev, inds = resolve_roles(built)
+
+    # Choose a layer-0 head other than the previous-token head.
+    other0_candidates = [
+        head for head in range(len(model.layers[0]))
+        if (0, head) != prev
+    ]
+
+    if other0_candidates:
+        other0 = (0, other0_candidates[0])
+    else:
+        # Fallback for architectures containing only one layer-0 head.
+        other0 = prev
+
+    # ---------------------------------------------------------
+    # 1. Copying scores and full OV-circuit diagonal fractions.
+    # ---------------------------------------------------------
+    copying = {}
+    ov_diag = {}
+
+    for head in inds:
+        l, h = head
+        module = model.layers[l][h]
+
+        # Spectral copying score of the head's OV matrix.
+        OV = ov_circuit(module)
+        copying[head] = float(copying_score(OV))
+
+        # Full token-space OV circuit, including embedding and unembedding.
+        _, diag_fraction = full_ov_circuit(model, l, h)
+        ov_diag[head] = float(diag_fraction)
+
+    # ---------------------------------------------------------
+    # 2. Cross-layer K-composition matrix.
+    # ---------------------------------------------------------
+    C = composition_matrix(model)
+
+    # Convert the matrix into a nested list rounded to four decimals.
+    composition = [
+        [round(float(value), 4) for value in row]
+        for row in C.detach().cpu().tolist()
+    ]
+
+    # ---------------------------------------------------------
+    # 3. Random composition baseline.
+    # ---------------------------------------------------------
+    # nn.Linear stores W_Q in shape (d_head, d).
+    first_head = model.layers[0][0]
+    d_head, d = first_head.W_Q.weight.shape
+
+    baseline_gen = torch.Generator().manual_seed(0)
+
+    baseline = random_composition_baseline(
+        baseline_gen,
+        d,
+        d_head,
+        20,
+    )
+
+    # ---------------------------------------------------------
+    # 4. Token-space composition for the candidate pathways.
+    # ---------------------------------------------------------
+    token_space = {}
+
+    for earlier in (prev, other0):
+        for later in inds:
+            _, diag_fraction, margin = token_space_composition(
+                model,
+                earlier,
+                later,
+            )
+
+            token_space[(earlier, later)] = (
+                float(diag_fraction),
+                float(margin),
+            )
+
+    # Return the complete evidence report.
+    return {
+        "scores": scores,
+        "copying": copying,
+        "ov_diag": ov_diag,
+        "composition": composition,
+        "baseline": float(baseline),
+        "token_space": token_space,
+    }
+
