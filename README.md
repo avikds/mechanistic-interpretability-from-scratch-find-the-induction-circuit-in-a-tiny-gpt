@@ -24,6 +24,7 @@ python scaffold.py
 - [x] **12.** token_space_composition
 - [x] **13.** make_pairs
 - [x] **14.** patching_grid
+- [x] **15.** ablation_effects
 
 ---
 

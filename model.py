@@ -755,3 +755,87 @@ def patching_grid(model, pairs):
 
     return grid, labels
 
+# Step 15 - ablation_effects
+@torch.no_grad()
+def ablation_effects(model, pairs, head, ref_pairs):
+    # Identify the head to ablate.
+    l, h = head
+    head_key = ("head", l, h)
+
+    B = pairs["clean"].shape[0]
+
+    # The reference batch must contain at least B examples.
+    if ref_pairs["clean"].shape[0] < B:
+        raise ValueError(
+            "ref_pairs must contain at least as many rows as pairs."
+        )
+
+    # Measure the clean and corrupted baseline logit differences.
+    m_clean = logit_diff(
+        model,
+        pairs["clean"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    m_corrupt = logit_diff(
+        model,
+        pairs["corrupt"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+    )
+
+    # Cache head outputs from the reference examples.
+    ref_cache = {}
+    model(ref_pairs["clean"], cache=ref_cache)
+
+    # The cached head output has shape (B_ref, T, d).
+    ref_output = ref_cache[head_key]
+
+    # Use the first B reference activations for resampling.
+    resample_output = ref_output[:B]
+
+    # Zero ablation: replace the head's output at every position with zero.
+    zero_output = torch.zeros_like(resample_output)
+
+    # Mean ablation: replace every example with the reference batch's
+    # mean head output, preserving the sequence position and feature.
+    mean_output = ref_output.mean(dim=0, keepdim=True).expand(
+        B, -1, -1
+    )
+
+    # Evaluate each intervention on the clean prompts.
+    ablated_outputs = {
+        "zero": zero_output,
+        "mean": mean_output,
+        "resample": resample_output,
+    }
+
+    # Normalize damage by the clean-to-corrupt behavioral difference.
+    denominator = m_clean - m_corrupt
+    effects = {}
+
+    for mode, replacement in ablated_outputs.items():
+        # Replace only the selected head's output.
+        patch = {head_key: replacement}
+
+        m_ablated = logit_diff(
+            model,
+            pairs["clean"],
+            pairs["pos"],
+            pairs["answer"],
+            pairs["wrong"],
+            patch=patch,
+        )
+
+        if abs(denominator) < 1e-12:
+            damage = 0.0
+        else:
+            damage = (m_clean - m_ablated) / denominator
+
+        effects[mode] = float(damage)
+
+    return effects
+
