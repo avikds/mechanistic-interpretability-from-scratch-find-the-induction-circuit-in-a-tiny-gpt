@@ -267,3 +267,42 @@ def train_model(model, steps, seed, lr=1e-3, batch=64, log_every=100, probe=None
 
     return history
 
+# Step 6 - induction_score
+def induction_score(A, n):
+    # A has shape (B, T, T); n contains one repeat length per row.
+    B, T, _ = A.shape
+
+    scores = []
+
+    for i in range(B):
+        repeat_len = int(n[i].item())
+
+        # Consider query positions in [n[i], 2 * n[i] - 1).
+        # Each query attends to the token following the first occurrence
+        # of its current token.
+        for t in range(repeat_len, 2 * repeat_len - 1):
+            key_pos = t - repeat_len + 1
+            scores.append(A[i, t, key_pos])
+
+    # Average all selected attention scores across rows and positions.
+    if not scores:
+        return 0.0
+
+    return float(torch.stack(scores).mean().item())
+
+
+def prev_token_score(A):
+    # A has shape (B, T, T).
+    _, T, _ = A.shape
+
+    # Handle sequences without any preceding-token positions.
+    if T <= 1:
+        return 0.0
+
+    # Extract the first sub-diagonal: attention from position t to t - 1.
+    positions = torch.arange(1, T, device=A.device)
+    scores = A[:, positions, positions - 1]
+
+    # Average over every batch row and every query position t >= 1.
+    return float(scores.mean().item())
+
