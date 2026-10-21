@@ -1089,3 +1089,117 @@ def direct_logit_attribution(model, pairs):
 
     return attribution
 
+# Step 18 - circuit_scores
+def metric_with(model, pairs, keep, mean_patches):
+    # Normalize the retained circuit to a set of (layer, head) pairs.
+    keep = set(keep)
+
+    # The model expects patch keys in the form ("head", layer, head).
+    # Apply mean ablation only to heads not included in the circuit.
+    patch = {}
+
+    for key, value in mean_patches.items():
+        # Convert ("head", layer, head) into (layer, head).
+        head_id = (key[1], key[2])
+
+        if head_id not in keep:
+            patch[key] = value
+
+    # Measure the clean-prompt logit difference with the selected patches.
+    return logit_diff(
+        model,
+        pairs["clean"],
+        pairs["pos"],
+        pairs["answer"],
+        pairs["wrong"],
+        patch=patch,
+    )
+
+
+def circuit_scores(model, pairs, circuit, ref_pairs):
+    # Enumerate every head in the model.
+    all_heads = {
+        (l, h)
+        for l, layer in enumerate(model.layers)
+        for h in range(len(layer))
+    }
+
+    circuit = set(circuit)
+
+    # Validate the requested circuit.
+    invalid_heads = circuit - all_heads
+    if invalid_heads:
+        raise ValueError(
+            f"Unknown heads in circuit: {sorted(invalid_heads)}"
+        )
+
+    # Cache the reference run to calculate mean head activations.
+    ref_cache = {}
+    with torch.no_grad():
+        model(ref_pairs["clean"], cache=ref_cache)
+
+    B = pairs["clean"].shape[0]
+
+    # Build mean patches using the exact keys expected by model.forward().
+    mean_patches = {}
+
+    for l, layer in enumerate(model.layers):
+        for h, _ in enumerate(layer):
+            key = ("head", l, h)
+
+            # Average over reference examples, preserving positions/features.
+            mean_output = ref_cache[key].mean(dim=0, keepdim=True)
+
+            # Expand to the evaluation batch size.
+            mean_patches[key] = (
+                mean_output.expand(B, -1, -1).detach()
+            )
+
+    # Full circuit: every head is retained, so no head is patched.
+    m_full = metric_with(
+        model, pairs, all_heads, mean_patches
+    )
+
+    # Empty circuit: every head is mean-ablated.
+    m_none = metric_with(
+        model, pairs, set(), mean_patches
+    )
+
+    denominator = m_full - m_none
+
+    # Compute normalized faithfulness for any retained head set.
+    def faithfulness_of(head_set):
+        metric = metric_with(
+            model, pairs, head_set, mean_patches
+        )
+
+        if abs(denominator) < 1e-12:
+            return 0.0
+
+        return float((metric - m_none) / denominator)
+
+    # Faithfulness: behavior retained by the proposed circuit.
+    faithfulness = faithfulness_of(circuit)
+
+    # Completeness: behavior explained by the complementary heads.
+    complement = all_heads - circuit
+    completeness = faithfulness_of(complement)
+
+    # Minimality: loss of faithfulness when each circuit head is removed.
+    minimality = {}
+
+    for head in sorted(circuit):
+        reduced_circuit = circuit - {head}
+
+        minimality[head] = float(
+            faithfulness - faithfulness_of(reduced_circuit)
+        )
+
+    return {
+        "faithfulness": float(faithfulness),
+        "completeness": float(completeness),
+        "minimality": minimality,
+        "m_full": float(m_full),
+        "m_none": float(m_none),
+    }
+

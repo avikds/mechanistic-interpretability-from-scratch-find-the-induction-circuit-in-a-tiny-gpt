@@ -27,6 +27,7 @@ python scaffold.py
 - [x] **15.** ablation_effects
 - [x] **16.** path_patch_report
 - [x] **17.** direct_logit_attribution
+- [x] **18.** circuit_scores
 
 ---
 
