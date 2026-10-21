@@ -421,3 +421,26 @@ def phase_change(history, acc_thresh=0.5, score_thresh=0.5):
         "final_induction": final_induction,
     }
 
+# Step 9 - qk_circuit
+def qk_circuit(head):
+    # W_Q and W_K have shape (d_head, d).
+    # The QK circuit maps residual-stream vectors to attention scores:
+    # x_i^T W_Q^T W_K x_j.
+    W_Q = head.W_Q.weight
+    W_K = head.W_K.weight
+
+    # Result shape: (d, d).
+    # Detach the result because this function analyzes weights, not gradients.
+    return (W_Q.T @ W_K).detach()
+
+
+def ov_circuit(head):
+    # W_V has shape (d_head, d), and W_O has shape (d, d_head).
+    # The OV circuit maps an attended residual-stream vector through
+    # the value projection and output projection.
+    W_V = head.W_V.weight
+    W_O = head.W_O.weight
+
+    # Result shape: (d, d).
+    return (W_O @ W_V).detach()
+
