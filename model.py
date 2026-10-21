@@ -205,3 +205,65 @@ def icl_accuracy(model, tokens, n):
     # Return the accuracy as a Python float.
     return float(hits / total) if total > 0 else 0.0
 
+# Step 5 - train_model
+import torch.nn.functional as F
+
+def train_model(model, steps, seed, lr=1e-3, batch=64, log_every=100, probe=None):
+    # Read vocabulary size and context length from the model.
+    V = model.wte.weight.shape[0]
+    T = model.wpe.weight.shape[0]
+
+    # Restrict repeat lengths to what the model's context can accommodate.
+    nmax = T // 2
+    nmin = min(6, nmax)
+
+    # Use a dedicated generator for reproducible training batches.
+    gen = torch.Generator().manual_seed(seed)
+
+    # Prepare Adam optimizer.
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+
+    # Create a fixed evaluation batch for comparable ICL accuracy scores.
+    eval_gen = torch.Generator().manual_seed(999)
+    eval_tokens, eval_n = make_batch(
+        256, eval_gen, V, T, nmin, nmax
+    )
+
+    # Store training and evaluation measurements.
+    history = []
+
+    for s in range(steps):
+        # Generate a batch with the model-compatible dimensions.
+        tokens, n = make_batch(batch, gen, V, T, nmin, nmax)
+
+        # Predict each next token from the preceding tokens.
+        logits = model(tokens[:, :-1])
+        targets = tokens[:, 1:]
+
+        # Compute cross-entropy across all batch and sequence positions.
+        loss = F.cross_entropy(
+            logits.reshape(-1, V),
+            targets.reshape(-1)
+        )
+
+        # Perform one optimization step.
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        # Record metrics at the requested interval and on the final step.
+        if s % log_every == 0 or s == steps - 1:
+            record = {
+                "step": s,
+                "loss": float(loss.item()),
+                "icl_acc": float(icl_accuracy(model, eval_tokens, eval_n)),
+            }
+
+            # Include any additional circuit or diagnostic measurements.
+            if probe is not None:
+                record.update(probe(model))
+
+            history.append(record)
+
+    return history
+

@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** Head
 - [x] **3.** AttnOnlyGPT
 - [x] **4.** icl_accuracy
+- [x] **5.** train_model
 
 ---
 
