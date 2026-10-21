@@ -16,6 +16,7 @@ python scaffold.py
 - [x] **4.** icl_accuracy
 - [x] **5.** train_model
 - [x] **6.** induction_score
+- [x] **7.** head_scores
 
 ---
 

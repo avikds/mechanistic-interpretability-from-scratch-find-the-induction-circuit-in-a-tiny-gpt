@@ -306,3 +306,57 @@ def prev_token_score(A):
     # Average over every batch row and every query position t >= 1.
     return float(scores.mean().item())
 
+# Step 7 - head_scores
+def head_scores(model, seed=999, B=64):
+    # Read the vocabulary size and context length from the model.
+    V = model.wte.weight.shape[0]
+    T = model.wpe.weight.shape[0]
+
+    # Use repeat lengths compatible with the model's context.
+    nmax = T // 2
+    nmin = min(6, nmax)
+
+    # Generate a reproducible batch of repeated-token sequences.
+    gen = torch.Generator().manual_seed(seed)
+    tokens, n = make_batch(B, gen, V, T, nmin, nmax)
+
+    # Capture the attention patterns from a single forward pass.
+    cache = {}
+    with torch.no_grad():
+        model(tokens, cache=cache)
+
+    # Calculate both scores for every attention head.
+    scores = {}
+
+    for l, layer in enumerate(model.layers):
+        for h, _ in enumerate(layer):
+            A = cache[("pattern", l, h)]
+
+            scores[(l, h)] = {
+                "induction": induction_score(A, n),
+                "prev_token": prev_token_score(A),
+            }
+
+    return scores
+
+
+def classify_heads(scores, ind_thresh=0.5, prev_thresh=0.25):
+    # Store the identified heads in separate, mutually exclusive categories.
+    result = {
+        "induction": [],
+        "previous": [],
+    }
+
+    for (l, h), score in scores.items():
+        if score["induction"] >= ind_thresh:
+            # Give induction classification priority if both thresholds pass.
+            result["induction"].append((l, h))
+        elif score["prev_token"] >= prev_thresh:
+            result["previous"].append((l, h))
+
+    # Return deterministic, sorted lists of (layer, head) pairs.
+    result["induction"].sort()
+    result["previous"].sort()
+
+    return result
+
