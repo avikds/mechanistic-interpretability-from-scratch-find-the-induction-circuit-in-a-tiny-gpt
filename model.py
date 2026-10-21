@@ -560,3 +560,41 @@ def random_composition_baseline(gen, d, d_head, trials):
 
     return float(sum(scores) / len(scores))
 
+# Step 12 - token_space_composition
+def token_space_composition(model, earlier, later):
+    # Retrieve the earlier writing head and the later reading head.
+    earlier_layer, earlier_head = earlier
+    later_layer, later_head = later
+
+    earlier_module = model.layers[earlier_layer][earlier_head]
+    later_module = model.layers[later_layer][later_head]
+
+    # Compute the earlier head's OV circuit and the later head's QK circuit.
+    OV_earlier = ov_circuit(earlier_module)
+    QK_later = qk_circuit(later_module)
+
+    # Token embedding matrix: (V, d).
+    E = model.wte.weight
+
+    # Compose the circuits in token space:
+    # S[x, y] measures how strongly the later head scores token y
+    # as a key when its query carries token x, through the earlier write.
+    S = (E @ QK_later @ OV_earlier @ E.T).detach()
+
+    # Fraction of rows whose maximum entry occurs on the diagonal.
+    diagonal = S.diagonal()
+    row_max = S.max(dim=1).values
+    diag_fraction = (diagonal == row_max).float().mean().item()
+
+    # Mean diagonal score minus mean off-diagonal score.
+    V = S.shape[0]
+    off_diag_mask = ~torch.eye(V, dtype=torch.bool, device=S.device)
+    off_diagonal = S[off_diag_mask]
+
+    if off_diagonal.numel() == 0:
+        margin = 0.0
+    else:
+        margin = (diagonal.mean() - off_diagonal.mean()).item()
+
+    return S, float(diag_fraction), float(margin)
+
