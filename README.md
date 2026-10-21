@@ -11,6 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** make_batch
+- [x] **2.** Head
 
 ---
 
