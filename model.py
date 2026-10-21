@@ -29,7 +29,6 @@ def make_batch(B, gen, V=32, T=48, nmin=6, nmax=24):
 import math
 import torch.nn as nn
 
-
 class Head(nn.Module):
     def __init__(self, d, d_head):
         super().__init__()
