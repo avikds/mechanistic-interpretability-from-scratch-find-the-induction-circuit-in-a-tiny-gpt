@@ -31,6 +31,7 @@ python scaffold.py
 - [x] **19.** attribution_patching
 - [x] **20.** build_model
 - [x] **21.** circuit_evidence
+- [x] **22.** induction_experiment
 
 ---
 

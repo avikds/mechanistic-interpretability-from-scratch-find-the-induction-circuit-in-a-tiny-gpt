@@ -1504,3 +1504,189 @@ def circuit_evidence(built):
         "token_space": token_space,
     }
 
+# Step 22 - induction_experiment
+def induction_experiment(seed=0, steps=2000, n_pairs=16, fixed_n=8):
+    # ---------------------------------------------------------
+    # 1. Train the model and gather circuit evidence.
+    # ---------------------------------------------------------
+    built = build_model(seed=seed, steps=steps)
+    model = built["model"]
+
+    ev = circuit_evidence(built)
+    prev, inds = resolve_roles(built)
+
+    # Resolve_roles guarantees at least one candidate induction head.
+    first_induction = inds[0]
+
+    # ---------------------------------------------------------
+    # 2. Generate reproducible clean/corrupt and reference pairs.
+    # ---------------------------------------------------------
+    pairs = make_pairs(
+        n_pairs,
+        torch.Generator().manual_seed(seed + 1),
+    )
+
+    ref = make_pairs(
+        2 * n_pairs,
+        torch.Generator().manual_seed(seed + 2),
+    )
+
+    # Every example has the same repeat length, allowing direct comparison
+    # of position-specific activation-patching scores.
+    fixed = make_pairs(
+        n_pairs,
+        torch.Generator().manual_seed(seed + 3),
+        nmin=fixed_n,
+        nmax=fixed_n,
+    )
+
+    # ---------------------------------------------------------
+    # 3. Exact activation patching and attribution patching.
+    # ---------------------------------------------------------
+    grid, labels = patching_grid(model, fixed)
+    est, _ = attribution_patching(model, fixed)
+
+    # Record the three highest-scoring cells of the exact grid.
+    flat_grid = grid.reshape(-1)
+    n_top = min(3, flat_grid.numel())
+    top_indices = torch.topk(flat_grid, k=n_top).indices
+
+    T_grid = grid.shape[1]
+    grid_top = []
+
+    for idx in top_indices:
+        flat_idx = int(idx.item())
+        row = flat_idx // T_grid
+        position = flat_idx % T_grid
+
+        grid_top.append((
+            labels[row],
+            position,
+            float(grid[row, position].item()),
+        ))
+
+    # Compare the estimated and exact patching grids.
+    attrib_overlap = float(top_k_overlap(est, grid, 3))
+
+    # ---------------------------------------------------------
+    # 4. Compare zero, mean, and resample ablations.
+    # ---------------------------------------------------------
+    ablations = {
+        "prev": ablation_effects(model, pairs, prev, ref),
+        "induction": ablation_effects(
+            model, pairs, first_induction, ref
+        ),
+    }
+
+    # ---------------------------------------------------------
+    # 5. Isolate the sender-to-receiver pathway.
+    # ---------------------------------------------------------
+    path = path_patch_report(
+        model,
+        pairs,
+        prev,
+        first_induction,
+    )
+
+    # ---------------------------------------------------------
+    # 6. Direct logit attribution for the clean prompts.
+    # ---------------------------------------------------------
+    dla = direct_logit_attribution(model, pairs)
+
+    # ---------------------------------------------------------
+    # 7. Score the candidate circuit and a reduced candidate.
+    # ---------------------------------------------------------
+    circuit = [prev] + inds
+
+    scores_full = circuit_scores(
+        model,
+        pairs,
+        circuit,
+        ref,
+    )
+
+    # If multiple induction heads were identified, compare the complete
+    # circuit with a reduced circuit containing only the first one.
+    if len(inds) >= 2:
+        scores_one = circuit_scores(
+            model,
+            pairs,
+            [prev, inds[0]],
+            ref,
+        )
+    else:
+        scores_one = None
+
+    # ---------------------------------------------------------
+    # 8. Measure ICL with no ablation, no induction heads,
+    #    and no previous-token head.
+    # ---------------------------------------------------------
+    eval_tokens, eval_n = make_batch(
+        256,
+        torch.Generator().manual_seed(999),
+    )
+
+    # Baseline in-context accuracy using the intact model.
+    icl_full = float(icl_accuracy(model, eval_tokens, eval_n))
+
+    # A lightweight callable wrapper lets icl_accuracy reuse its usual
+    # interface while supplying zero-output patches to selected heads.
+    class ZeroPatchedModel:
+        def __init__(self, base_model, heads):
+            self.base_model = base_model
+            self.heads = tuple(heads)
+
+        def forward(self, idx):
+            # Each zero patch must match the input batch and sequence length.
+            B_eval, T_eval = idx.shape
+            d_model = self.base_model.wte.weight.shape[1]
+
+            patch = {}
+            for l, h in self.heads:
+                patch[("head", l, h)] = (
+                    self.base_model.wte.weight.new_zeros(
+                        B_eval,
+                        T_eval,
+                        d_model,
+                    )
+                )
+
+            return self.base_model(idx, patch=patch)
+
+        def __call__(self, idx):
+            return self.forward(idx)
+
+    # Zero-ablate all identified induction heads simultaneously.
+    no_induction_model = ZeroPatchedModel(model, inds)
+    icl_no_induction = float(
+        icl_accuracy(no_induction_model, eval_tokens, eval_n)
+    )
+
+    # Zero-ablate the selected previous-token head.
+    no_prev_model = ZeroPatchedModel(model, [prev])
+    icl_no_prev = float(
+        icl_accuracy(no_prev_model, eval_tokens, eval_n)
+    )
+
+    # ---------------------------------------------------------
+    # 9. Return the plain-data experiment report.
+    # ---------------------------------------------------------
+    return {
+        "phase": built["phase"],
+        "roles": built["roles"],
+        "evidence": ev,
+        "grid_top": grid_top,
+        "attrib_overlap": attrib_overlap,
+        "ablations": ablations,
+        "path": path,
+        "dla": dla,
+        "circuit": circuit,
+        "scores_full": scores_full,
+        "scores_one": scores_one,
+        "icl": {
+            "full": icl_full,
+            "no_induction": icl_no_induction,
+            "no_prev": icl_no_prev,
+        },
+    }
+
