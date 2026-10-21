@@ -598,3 +598,73 @@ def token_space_composition(model, earlier, later):
 
     return S, float(diag_fraction), float(margin)
 
+# Step 13 - make_pairs
+def make_pairs(B, gen, V=32, T=48, nmin=6, nmax=24):
+    # Generate random sequences with a repeated prefix.
+    tokens, n = make_batch(B, gen, V, T, nmin, nmax)
+
+    # Start with a clean copy of every sequence.
+    clean = tokens.clone()
+    corrupt = tokens.clone()
+
+    # Store the prediction position, correct answer, and incorrect alternative.
+    pos = torch.empty(B, dtype=torch.long)
+    answer = torch.empty(B, dtype=torch.long)
+    wrong = torch.empty(B, dtype=torch.long)
+
+    for i in range(B):
+        k = int(n[i].item())
+
+        # The final position in the second copy whose next token
+        # remains inside that copy.
+        pos[i] = 2 * k - 2
+
+        # The correct next token is the token following the first
+        # occurrence of the token at position k - 2.
+        answer[i] = tokens[i, k - 1]
+
+        # Select a guaranteed different token as the comparison target.
+        wrong_offset = torch.randint(1, V, (1,), generator=gen).item()
+        wrong[i] = (int(answer[i].item()) + wrong_offset) % V
+
+        # Corrupt the original occurrence to disrupt the induction lookup.
+        corrupt_offset = torch.randint(1, V, (1,), generator=gen).item()
+        replacement = (
+            int(tokens[i, k - 2].item()) + corrupt_offset
+        ) % V
+
+        corrupt[i, k - 2] = replacement
+
+    return {
+        "clean": clean,
+        "corrupt": corrupt,
+        "pos": pos,
+        "answer": answer,
+        "wrong": wrong,
+        "n": n,
+    }
+
+
+@torch.no_grad()
+def logit_diff(model, tokens, pos, answer, wrong, patch=None):
+    # Run the model on the supplied prompts, optionally applying
+    # the specified head-output patches.
+    logits = model(tokens, patch=patch)
+
+    # Construct batch indices on the same device as the logits.
+    rows = torch.arange(logits.shape[0], device=logits.device)
+
+    # Ensure the indexing tensors are on the correct device.
+    pos = pos.to(device=logits.device, dtype=torch.long)
+    answer = answer.to(device=logits.device, dtype=torch.long)
+    wrong = wrong.to(device=logits.device, dtype=torch.long)
+
+    # The logits at position t predict the token at position t + 1.
+    correct_logits = logits[rows, pos, answer]
+    incorrect_logits = logits[rows, pos, wrong]
+
+    # Average correct-answer preference over all prompts.
+    difference = correct_logits - incorrect_logits
+
+    return float(difference.mean().item())
+
