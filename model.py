@@ -1010,3 +1010,82 @@ def path_patch_report(model, pairs, sender, receiver):
 
     return report
 
+# Step 17 - direct_logit_attribution
+@torch.no_grad()
+def direct_logit_attribution(model, pairs):
+    # Run the clean prompts and cache the embedding, head outputs,
+    # and final residual stream.
+    cache = {}
+    logits = model(pairs["clean"], cache=cache)
+
+    device = logits.device
+    B = logits.shape[0]
+
+    rows = torch.arange(B, device=device)
+    pos = pairs["pos"].to(device=device, dtype=torch.long)
+    answer = pairs["answer"].to(device=device, dtype=torch.long)
+    wrong = pairs["wrong"].to(device=device, dtype=torch.long)
+
+    # Logit-difference direction in residual-stream space:
+    # d = U[answer] - U[wrong], with shape (B, d_model).
+    U = model.unembed.weight
+    d = U[answer] - U[wrong]
+
+    # Gather the final residual stream at each row's scoring position.
+    residual = cache["resid_final"][rows, pos]
+
+    # Calculate the population standard deviation used by LayerNorm.
+    # PyTorch LayerNorm normalizes using sqrt(var + eps).
+    variance = residual.var(dim=-1, unbiased=False, keepdim=True)
+    sigma = torch.sqrt(variance + model.lnf.eps)
+
+    # Final LayerNorm parameters.
+    gamma = model.lnf.weight
+    beta = model.lnf.bias
+
+    # Include the LayerNorm bias contribution separately.
+    bias_contribution = (d * beta).sum(dim=-1).mean()
+
+    attribution = {}
+
+    # Attribute each residual component using the same final-residual
+    # standard deviation, preserving exact additive decomposition.
+    def component_contribution(component):
+        # Each component has shape (B, T, d_model).
+        # Gather the component at each row's scoring position.
+        w = component[rows, pos]
+
+        # Center each component across its model dimensions.
+        w_centered = w - w.mean(dim=-1, keepdim=True)
+
+        # Apply final LayerNorm's scale and the unembedding direction.
+        normalized_component = gamma * w_centered / sigma
+
+        # Mean contribution to the correct-minus-wrong logit difference.
+        return (d * normalized_component).sum(dim=-1).mean()
+
+    # Token plus positional embedding contribution.
+    attribution["embed"] = float(
+        component_contribution(cache["embed"]).item()
+    )
+
+    # Contribution from every attention head in every layer.
+    for l, layer in enumerate(model.layers):
+        for h, _ in enumerate(layer):
+            key = ("head", l, h)
+            attribution[key] = float(
+                component_contribution(cache[key]).item()
+            )
+
+    attribution["bias"] = float(bias_contribution.item())
+
+    # Actual mean logit difference, computed directly from model logits.
+    correct_logits = logits[rows, pos, answer]
+    wrong_logits = logits[rows, pos, wrong]
+
+    attribution["total"] = float(
+        (correct_logits - wrong_logits).mean().item()
+    )
+
+    return attribution
+
